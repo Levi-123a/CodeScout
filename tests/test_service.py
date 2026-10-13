@@ -124,7 +124,7 @@ class ServiceTests(unittest.TestCase):
     def test_project_options_can_be_changed_without_losing_reports(self):
         project = self.add(allow_send=False)
         self.service.update_options(project["id"], {"allow_send": True, "custom_rules": "同步文档", "excludes": ["generated/**"]})
-        stored = self.store.project(project["id"])
+        stored = self.service.project_with_rules(project["id"])
         self.assertTrue(stored["allow_send"])
         self.assertEqual(stored["custom_rules"], "同步文档")
         self.assertEqual(stored["excludes"], ["generated/**"])
@@ -161,7 +161,7 @@ class ServiceTests(unittest.TestCase):
         self.service.configure_model({"base_url": "https://example.com/v1", "model": "x"})
         project = self.add()
         self.service.observe()
-        def interrupted(*args):
+        def interrupted(*args, **kwargs):
             with patch("codescout.service.capture", side_effect=ValueError("continuing edits")):
                 self.service.observe()
             return {"status": "completed", "findings": [], "coverage": {"checked": ["main.py", "README.md"]}}

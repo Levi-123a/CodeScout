@@ -2,13 +2,28 @@
 
 import hmac
 import json
+import os
 import re
+import socket
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlsplit
 
+from .native import choose_folder
+
 WEB_ROOT = Path(__file__).parent / "web"
 ASSETS = {"/": ("index.html", "text/html; charset=utf-8"), "/app.js": ("app.js", "text/javascript; charset=utf-8"), "/style.css": ("style.css", "text/css; charset=utf-8")}
+
+
+class LoopbackServer(ThreadingHTTPServer):
+    # Windows SO_REUSEADDR permits multiple listeners: requests can reach a server
+    # with a different session token. Reserve the address before binding instead.
+    allow_reuse_address = os.name != "nt"
+
+    def server_bind(self):
+        if os.name == "nt":
+            self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+        super().server_bind()
 
 
 def create_server(service, port, token):
@@ -60,6 +75,17 @@ def create_server(service, port, token):
                 return self.send(200, service.configure_model(self.body()))
             if self.command == "POST" and path == "/api/projects":
                 return self.send(201, service.add_project(self.body()))
+            if self.command == "POST" and path == "/api/pick-folder":
+                self.body()
+                folder = choose_folder()
+                return self.send(200, {"path": folder, "cancelled": folder is None})
+            repair_route = re.fullmatch(r"/api/projects/([a-f0-9]{32})/repairs(?:/([a-f0-9]{32})/apply)?", path)
+            if self.command == "POST" and repair_route:
+                project_id, repair_id = repair_route.groups()
+                data = self.body()
+                if repair_id:
+                    return self.send(202, service.queue_apply(project_id, repair_id))
+                return self.send(202, service.queue_repair(project_id, data.get("finding_id")))
             match = re.fullmatch(r"/api/projects/([a-f0-9]{32})(?:/(runs|pause|resume|retry|findings|config))?", path)
             if match:
                 project_id, action = match.groups()
@@ -84,7 +110,11 @@ def create_server(service, port, token):
             self.connection.settimeout(10)
             try:
                 self.dispatch()
-            except (ValueError, TypeError, KeyError):
+            except json.JSONDecodeError:
+                self.send(400, {"error": "请求必须为有效 JSON"})
+            except ValueError as error:
+                self.send(400, {"error": str(error)})
+            except (TypeError, KeyError):
                 self.send(400, {"error": "输入无效，请检查字段、路径和模型配置"})
             except (BrokenPipeError, ConnectionResetError, TimeoutError):
                 pass
@@ -95,4 +125,4 @@ def create_server(service, port, token):
         do_POST = handle_request
         do_DELETE = handle_request
 
-    return ThreadingHTTPServer(("127.0.0.1", port), Handler)
+    return LoopbackServer(("127.0.0.1", port), Handler)

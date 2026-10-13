@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 DEFAULT_DIRS = {".git", ".hg", ".svn", "node_modules", "vendor", ".venv", "venv", "__pycache__", "dist", "build", ".next", ".codescout", ".superpowers"}
+GENERATED_NAMES = {"package-lock.json", "pnpm-lock.yaml", "yarn.lock", "poetry.lock", "uv.lock", "cargo.lock", "composer.lock"}
 SECRET_NAMES = {".env", "id_rsa", "id_ed25519", "credentials", "credentials.json", ".npmrc", ".pypirc", "secrets.json"}
 SECRET_SUFFIXES = {".pem", ".key", ".p12", ".pfx", ".db", ".sqlite", ".sqlite3"}
 MAX_FILE_BYTES = 256 * 1024
@@ -82,6 +83,8 @@ def _git(root, *args):
 
 def _reason(name, excludes):
     path = Path(name)
+    if path.name.startswith(".codescout-") or path.name.lower() in GENERATED_NAMES or path.name.lower().endswith((".min.js", ".min.css", ".map", ".log")):
+        return "生成文件或巡码临时文件"
     if any(part in DEFAULT_DIRS for part in path.parts):
         return "依赖、构建产物或内部目录"
     if any(part.lower() in {".aws", ".ssh"} for part in path.parts) or path.name.lower() in SECRET_NAMES or path.name.lower().startswith(".env.") or path.suffix.lower() in SECRET_SUFFIXES or path.name.lower().endswith((".db-wal", ".db-shm")):

@@ -41,6 +41,17 @@ class ServerTests(unittest.TestCase):
                 self.request("/api/state", auth=auth, origin=origin)
             self.assertEqual(error.exception.code, 403)
 
+    def test_second_service_cannot_share_a_live_port_with_a_different_token(self):
+        second = None
+        try:
+            with self.assertRaises(OSError):
+                second = create_server(Service(self.store), self.server.server_port, "second-session-token")
+        finally:
+            if second:
+                second.server_close()
+        # The original service remains reachable with its original credential.
+        self.assertEqual(self.request("/api/state")["projects"], [])
+
     def test_projects_model_and_pause_roundtrip_without_key_echo(self):
         self.request("/api/model", {"base_url": "https://example.com/v1", "model": "x", "api_key": "secret"})
         project = self.request("/api/projects", {"path": str(self.root), "allow_send": True})
@@ -62,4 +73,13 @@ class ServerTests(unittest.TestCase):
         with self.assertRaises(HTTPError) as error:
             urlopen(self.url + "/../store.py", timeout=3)
         self.assertEqual(error.exception.code, 404)
+
+    def test_folder_selector_returns_path_or_cancellation_without_adding(self):
+        from unittest.mock import patch
+        with patch("codescout.server.choose_folder", return_value=str(self.root)):
+            result = self.request("/api/pick-folder", {})
+            self.assertEqual(result["path"], str(self.root))
+        with patch("codescout.server.choose_folder", return_value=None):
+            self.assertTrue(self.request("/api/pick-folder", {})["cancelled"])
+        self.assertEqual(self.store.projects(), [])
 

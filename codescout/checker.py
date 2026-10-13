@@ -1,54 +1,11 @@
 """Build snapshot-consistent context and validate every reported source citation."""
 
-import difflib
 import json
-from pathlib import PurePosixPath
 
 from .model import ModelClient, ModelError
+from .analysis import syntax_findings
+from .context import plan_batches
 
-
-def _size(context):
-    return len(json.dumps(context, ensure_ascii=False))
-
-
-def build_context(snapshot, previous, budget, custom_rules):
-    previous = previous or {}
-    changed = sorted(name for name, text in snapshot.files.items() if previous.get(name) != text)
-    missing = set(previous) - set(snapshot.files)
-    removed_from_scope = sorted(name for name in missing if any(name == excluded or excluded.endswith("/") and name.startswith(excluded) for excluded in snapshot.excluded))
-    deleted = sorted(missing - set(removed_from_scope))
-    rules = sorted(name for name in snapshot.files if PurePosixPath(name).name in {"AGENTS.md", "CLAUDE.md"})
-    docs = sorted(name for name in snapshot.files if name.lower().endswith((".md", ".rst", ".txt")))
-    priority = list(dict.fromkeys(rules + changed + docs + sorted(snapshot.files)))
-    context = {"target": "worktree", "custom_rules": custom_rules, "rules": [], "changed": changed, "deleted": deleted, "diff": "", "files": {}}
-    # The model sees complete selected files. No silent per-file truncation.
-    uncovered = []
-    if _size(context) > budget:
-        raise ModelError("约定与变化列表超过上下文预算，请增加预算或缩小项目范围")
-    for name in priority:
-        context["files"][name] = snapshot.files[name]
-        if name in rules:
-            context["rules"].append({"path": name, "scope": str(PurePosixPath(name).parent)})
-        if _size(context) > budget:
-            del context["files"][name]
-            if name in rules:
-                context["rules"].pop()
-            uncovered.append(name)
-    if any(name in uncovered for name in rules):
-        raise ModelError("有效约定文件超出上下文预算，未执行检查；请增加预算")
-    diffs = []
-    for name in sorted(set(changed) | set(deleted)):
-        if name not in context["files"] and name not in deleted:
-            continue
-        diff = "".join(difflib.unified_diff(previous.get(name, "").splitlines(True), snapshot.files.get(name, "").splitlines(True), fromfile="before/" + name, tofile="after/" + name))
-        context["diff"] = "".join(diffs) + diff
-        if _size(context) <= budget:
-            diffs.append(diff)
-    context["diff"] = "".join(diffs)
-    coverage = {"checked": sorted(context["files"]), "uncovered": sorted(uncovered), "excluded": snapshot.excluded,
-                "warnings": snapshot.warnings, "changed": changed, "deleted": deleted, "removed_from_scope": removed_from_scope, "context_chars": _size(context), "budget_chars": budget,
-                "rules": context["rules"], "diff_included": bool(context["diff"])}
-    return context, coverage
 
 
 def _validate_location(location, files):
@@ -79,15 +36,54 @@ def validate_findings(findings, files):
     return findings
 
 
-def check_snapshot(snapshot, previous, config, custom_rules):
+def check_snapshot(snapshot, previous, config, custom_rules, resume=None, on_progress=None, should_continue=None, previous_coverage=None, required_paths=()):
     coverage = {"checked": [], "uncovered": sorted(snapshot.files), "excluded": snapshot.excluded, "warnings": snapshot.warnings}
+    completed = []
+    findings = syntax_findings(snapshot.files)
+    progress = {"completed": 0, "total": 0, "current_file": ""}
+    def report(status, error=None):
+        result = {"status": status, "findings": list(findings), "coverage": dict(coverage), "git": snapshot.git, "model": config["model"],
+                  "model_version": config.get("version", 0), "batches": list(completed), "progress": dict(progress)}
+        if error:
+            result["error"] = error
+        return result
     try:
-        context, coverage = build_context(snapshot, previous, config.get("context_chars", 60000), custom_rules)
-        if not context["files"] and snapshot.files:
-            raise ModelError("上下文预算无法容纳任何完整文件，检查未完成")
-        findings = ModelClient().check(config, context) if context["files"] else []
-        findings = validate_findings(findings, context["files"])
-        status = "partial" if coverage["uncovered"] or snapshot.warnings else "completed"
-        return {"status": status, "findings": findings, "coverage": coverage, "git": snapshot.git, "model": config["model"], "model_version": config.get("version", 0)}
+        batches, coverage = plan_batches(snapshot, previous, config, custom_rules, previous_coverage, required_paths)
+        progress["total"] = len(batches)
+        saved = {batch["id"]: batch for batch in (resume or {}).get("batches", [])}
+        done_by_path = {}
+        required_by_path = {}
+        for batch in batches:
+            required_by_path[batch["path"]] = required_by_path.get(batch["path"], 0) + 1
+        skipped_paths = {item["path"] for item in coverage["skipped_ranges"]}
+        seen = {json.dumps(item, sort_keys=True, ensure_ascii=False) for item in findings}
+        for batch in batches:
+            if should_continue and not should_continue():
+                return report("superseded", "检查对象已变化")
+            progress["current_file"] = batch["path"]
+            if on_progress:
+                on_progress(report("running"))
+            issues = saved[batch["id"]]["findings"] if batch["id"] in saved else ModelClient().check(config, batch["context"])
+            validate_findings(issues, snapshot.files)
+            for issue in issues:
+                for citation in [issue, *issue["related"]]:
+                    bounds = batch["context"]["file_ranges"].get(citation["path"])
+                    if bounds is None or not bounds[0] <= citation["line"] <= bounds[1]:
+                        raise ModelError("模型证据引用了本批次未读取的行段")
+                identity = json.dumps(issue, sort_keys=True, ensure_ascii=False)
+                if identity not in seen:
+                    findings.append(issue)
+                    seen.add(identity)
+            completed.append({key: batch[key] for key in ("id", "path", "start_line", "end_line", "context_chars") } | {"findings": issues})
+            done_by_path[batch["path"]] = done_by_path.get(batch["path"], 0) + 1
+            coverage["ranges"] = [{key: item[key] for key in ("path", "start_line", "end_line")} for item in completed]
+            coverage["checked"] = sorted(path for path, count in done_by_path.items() if count == required_by_path[path] and path not in skipped_paths)
+            coverage["uncovered"] = sorted(set(required_by_path) - set(coverage["checked"]) | skipped_paths)
+            coverage["context_chars"] = max(coverage["context_chars"], batch["context_chars"])
+            progress["completed"] = len(completed)
+            if on_progress:
+                on_progress(report("running"))
+        status = "partial" if coverage["uncovered"] or coverage["warnings"] else "completed"
+        return report(status)
     except ModelError as error:
-        return {"status": "failed", "findings": [], "coverage": coverage, "error": str(error), "git": snapshot.git}
+        return report("failed", str(error))

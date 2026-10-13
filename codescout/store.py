@@ -33,6 +33,7 @@ class Store:
                 CREATE TABLE IF NOT EXISTS findings (id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
                     run_id TEXT NOT NULL, identity TEXT NOT NULL, status TEXT NOT NULL, data TEXT NOT NULL,
                     UNIQUE(project_id, identity));
+                CREATE TABLE IF NOT EXISTS repairs (id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE, data TEXT NOT NULL);
             """)
 
     @contextmanager
@@ -117,6 +118,7 @@ class Store:
             if result["status"] not in {"completed", "partial"} or run["stale"]:
                 return
             checked = set(result.get("coverage", {}).get("checked", []))
+            reused = set(result.get("coverage", {}).get("reused", []))
             deleted = set(result.get("coverage", {}).get("deleted", []))
             identities = set()
             occurrences = {}
@@ -130,10 +132,68 @@ class Store:
                 finding_id = existing["id"] if existing else uuid.uuid4().hex
                 status = "ignored" if existing and existing["status"] == "ignored" else "open"
                 db.execute("INSERT OR REPLACE INTO findings VALUES (?,?,?,?,?,?)", (finding_id, run["project_id"], run_id, identity, status, encode(finding)))
+            current_snapshot = json.loads(run["snapshot"])
+            carried = []
             for old in db.execute("SELECT * FROM findings WHERE project_id=?", (run["project_id"],)).fetchall():
-                location = json.loads(old["data"]).get("path")
+                data = json.loads(old["data"])
+                location = data.get("path")
+                if old["identity"] not in identities and location in reused:
+                    origin = db.execute("SELECT snapshot,result FROM runs WHERE id=?", (old["run_id"],)).fetchone()
+                    if origin:
+                        old_snapshot, old_result = json.loads(origin["snapshot"]), json.loads(origin["result"])
+                        citations = [data, *data.get("related", [])]
+                        matching_configuration = result.get("configuration") and old_result.get("configuration") == result["configuration"]
+                        if matching_configuration and all(item["path"] in current_snapshot and current_snapshot[item["path"]] == old_snapshot.get(item["path"]) for item in citations):
+                            data.update(carried_from_run=data.get("carried_from_run", old["run_id"]), not_rechecked=True)
+                            db.execute("UPDATE findings SET run_id=?,data=? WHERE id=?", (run_id, encode(data), old["id"]))
+                            carried.append(data)
                 if result["status"] == "completed" and old["identity"] not in identities and location in checked | deleted and old["status"] != "ignored":
                     db.execute("UPDATE findings SET status='resolved',run_id=? WHERE id=?", (run_id, old["id"]))
+            if carried:
+                result["carried_findings"] = carried
+                db.execute("UPDATE runs SET result=? WHERE id=?", (encode(result), run_id))
+
+    def save_progress(self, run_id, result):
+        with self.connection() as db:
+            db.execute("UPDATE runs SET result=? WHERE id=? AND status='running'", (encode(result), run_id))
+
+    def checkpoint(self, project_id, check_key):
+        with self.connection() as db:
+            row = db.execute("SELECT result FROM runs WHERE project_id=? AND check_key=? AND status IN ('failed','partial','superseded') ORDER BY created_at DESC LIMIT 1", (project_id, check_key)).fetchone()
+        return json.loads(row["result"]) if row else None
+
+    def create_repair(self, project_id, data):
+        repair = {**data, "id": uuid.uuid4().hex, "project_id": project_id, "created_at": now(), "status": "queued", "stage": "queued", "events": []}
+        with self.connection() as db:
+            db.execute("INSERT INTO repairs VALUES (?,?,?)", (repair["id"], project_id, encode(repair)))
+        return repair
+
+    def repair(self, project_id, repair_id):
+        with self.connection() as db:
+            row = db.execute("SELECT data FROM repairs WHERE id=? AND project_id=?", (repair_id, project_id)).fetchone()
+        if not row:
+            raise ValueError("修复记录不存在")
+        return json.loads(row["data"])
+
+    def update_repair(self, repair_id, **changes):
+        with self.connection() as db:
+            row = db.execute("SELECT data FROM repairs WHERE id=?", (repair_id,)).fetchone()
+            if not row:
+                return None
+            repair = json.loads(row["data"])
+            repair.update(changes)
+            db.execute("UPDATE repairs SET data=? WHERE id=?", (encode(repair), repair_id))
+        return repair
+
+    def repairs(self, project_id, public=True):
+        with self.connection() as db:
+            rows = db.execute("SELECT data FROM repairs WHERE project_id=? ORDER BY rowid DESC LIMIT 50", (project_id,)).fetchall()
+        repairs = [json.loads(row["data"]) for row in rows]
+        if public:
+            for repair in repairs:
+                repair.pop("configuration", None)
+                repair["changes"] = [{key: value for key, value in change.items() if key not in {"before_bytes", "after_bytes"}} for change in repair.get("changes", [])]
+        return repairs
 
     def runs(self, project_id):
         with self.connection() as db:
@@ -166,4 +226,12 @@ class Store:
 
     def recover(self):
         with self.connection() as db:
-            db.execute("UPDATE runs SET status='failed',finished_at=?,result=? WHERE status='running'", (now(), encode({"status": "failed", "error": "服务中断，等待重新检查", "findings": [], "coverage": {}})))
+            for row in db.execute("SELECT id,result FROM runs WHERE status='running'").fetchall():
+                result = json.loads(row["result"])
+                result.update(status="failed", error="服务中断，将从已完成批次继续检查")
+                db.execute("UPDATE runs SET status='failed',finished_at=?,result=? WHERE id=?", (now(), encode(result), row["id"]))
+            for row in db.execute("SELECT id,data FROM repairs").fetchall():
+                repair = json.loads(row["data"])
+                if repair["status"] in {"queued", "running"}:
+                    repair.update(status="failed", stage="interrupted", error="服务中断，修复未完成；不会自动继续应用")
+                    db.execute("UPDATE repairs SET data=? WHERE id=?", (encode(repair), row["id"]))

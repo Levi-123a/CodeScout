@@ -9,8 +9,10 @@ def model_server(response=None, status=200, raw=None):
     requests = []
     class Handler(BaseHTTPRequestHandler):
         def do_POST(self):
-            requests.append(json.loads(self.rfile.read(int(self.headers["Content-Length"]))))
-            payload = raw if raw is not None else json.dumps({"choices": [{"message": {"content": json.dumps({"findings": response or []})}}]}).encode()
+            request = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+            requests.append(request)
+            findings = response(json.loads(request["messages"][1]["content"])) if callable(response) else response or []
+            payload = raw if raw is not None else json.dumps({"choices": [{"message": {"content": json.dumps({"findings": findings})}}]}).encode()
             self.send_response(status)
             self.send_header("Content-Type", "application/json")
             self.end_headers()

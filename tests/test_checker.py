@@ -1,7 +1,7 @@
 import json
 import unittest
 
-from codescout.checker import build_context, check_snapshot
+from codescout.checker import check_snapshot
 from codescout.snapshot import Snapshot
 from tests.helpers import finding, model_server
 
@@ -47,12 +47,12 @@ class CheckerTests(unittest.TestCase):
 
     def test_budget_marks_uncovered_files_and_partial_status(self):
         with model_server() as (config, requests):
-            config["context_chars"] = 900
+            config["context_chars"] = 2000
             result = check_snapshot(self.snapshot({"small.py": "x = 1", "big.py": "x" * 5000}), None, config, "")
         self.assertEqual(result["status"], "partial")
         self.assertIn("big.py", result["coverage"]["uncovered"])
         self.assertIn("small.py", result["coverage"]["checked"])
-        self.assertLessEqual(len(requests[0]["messages"][1]["content"]), 900)
+        self.assertLessEqual(len(json.dumps(requests[0], ensure_ascii=False)), 2000)
 
     def test_snapshot_limits_cannot_report_full_completion(self):
         with model_server() as (config, _):
@@ -61,9 +61,11 @@ class CheckerTests(unittest.TestCase):
 
     def test_new_exclusion_does_not_send_old_content_as_deletion(self):
         snapshot = Snapshot({"main.py": "return 2"}, {"private/": "用户排除", "secret.py": "用户排除"}, [], "new", None)
-        context, coverage = build_context(snapshot, {"main.py": "return 2", "secret.py": "private-token", "private/a.py": "private-content", "deleted.py": "removed"}, 60000, "")
-        self.assertNotIn("private-token", json.dumps(context))
-        self.assertNotIn("private-content", json.dumps(context))
+        with model_server() as (config, requests):
+            result = check_snapshot(snapshot, {"main.py": "return 2", "secret.py": "private-token", "private/a.py": "private-content", "deleted.py": "removed"}, config, "")
+        coverage = result["coverage"]
+        self.assertNotIn("private-token", json.dumps(requests))
+        self.assertNotIn("private-content", json.dumps(requests))
         self.assertEqual(coverage["deleted"], ["deleted.py"])
         self.assertIn("secret.py", coverage["removed_from_scope"])
 
