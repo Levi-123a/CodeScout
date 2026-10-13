@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "codescout-local"
+version = "0.1.0"
+description = "巡码：本地项目规范检查服务"
+requires-python = ">=3.11"
+dependencies = []
+
+[project.scripts]
+codescout = "codescout.__main__:main"
+
+[tool.setuptools.package-data]
+codescout = ["web/*.html", "web/*.css", "web/*.js"]
+
+[tool.setuptools.packages.find]
+include = ["codescout*"]
+

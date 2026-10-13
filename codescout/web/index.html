@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>巡码 CodeScout · 项目检查台</title>
+  <link rel="stylesheet" href="/style.css">
+  <script src="/app.js" defer></script>
+</head>
+<body>
+  <aside class="sidebar">
+    <a class="brand" href="/"><span class="brand-mark">巡</span><span>巡码<small>CODESCOUT</small></span></a>
+    <div class="nav-label">工作空间 <span id="project-count">0</span></div>
+    <nav id="project-list" aria-label="项目列表"></nav>
+    <button id="add-project" class="sidebar-add">＋ 接入项目</button>
+    <div class="sidebar-bottom"><span class="service-dot"></span> 本机后台服务<small>页面关闭后，检查继续运行</small><button id="open-model" class="text-button">模型设置 ↗</button></div>
+  </aside>
+  <main>
+    <header><div class="breadcrumb">工作空间 <span>/</span> 项目检查台</div><span class="version">本地预览版 · v0.1</span></header>
+    <div id="notice" role="status" aria-live="polite" hidden></div>
+    <section class="page-heading"><div><p class="eyebrow">CONTINUOUS CODE REVIEW</p><h1>让项目约定，持续生效。</h1><p class="subtitle">观察每次变化，核对代码、注释与文档，保留可追溯的检查依据。</p></div><button id="top-add" class="primary">＋ 接入项目</button></section>
+    <div id="model-banner" class="banner" hidden><div><strong>先连接你的模型</strong><p>配置外部 API 后，已授权的项目会自动开始检查。</p></div><button id="banner-model" class="secondary">配置模型</button></div>
+    <section id="empty" class="empty-state"><div class="empty-symbol">⌘</div><p class="eyebrow">从一个项目开始</p><h2>把约定带进日常开发</h2><p>接入本地文件夹，选择可发送的范围。巡码会自动检查，<br>保存文件后继续复查，无须逐次点击。</p><button id="empty-add" class="primary">接入第一个项目 →</button><div class="steps"><span><b>01</b> 配置外部模型</span><span><b>02</b> 接入本地项目</span><span><b>03</b> 查看检查依据</span></div></section>
+    <section id="project-view" hidden>
+      <div class="project-title"><div><div class="title-line"><h2 id="project-name"></h2><span id="project-status" class="badge"></span></div><p id="project-path" class="path"></p></div><div class="actions"><button id="edit-project" class="secondary">项目设置</button><button id="pause-project" class="secondary">暂停</button><button id="retry-project" class="secondary">重新检查</button><button id="remove-project" class="icon-button" aria-label="移除项目监控">移除</button></div></div>
+      <div class="stats"><article><span>待处理问题</span><strong id="open-count">0</strong><small>有依据的问题，等待你的判断</small></article><article><span>最近检查范围</span><strong id="coverage-count">—</strong><small id="coverage-caption">等待首次检查</small></article><article><span>最近检查</span><strong id="checked-time" class="time-value">—</strong><small id="target-caption">工作目录快照</small></article></div>
+      <div id="project-error" class="error-box" hidden></div>
+      <div class="scope-note"><span class="service-dot"></span><span>自动监控工作目录 · 约定：AGENTS.md / CLAUDE.md 与附加约定</span><span id="git-caption"></span></div>
+      <div class="tabs"><button id="findings-tab" class="tab active">问题清单</button><button id="runs-tab" class="tab">检查记录</button><label class="filter">状态 <select id="finding-filter"><option value="open">待处理</option><option value="all">全部</option><option value="ignored">已忽略</option><option value="resolved">已解决</option></select></label></div>
+      <div id="findings-list"></div><div id="runs-list" hidden></div>
+    </section>
+    <footer>当前支持工作目录检查；本地提交快照、远程监控和 Agent 修复将在后续阶段实现。<span>源码始终由你掌控。</span></footer>
+  </main>
+  <dialog id="project-dialog"><form id="project-form"><div class="dialog-heading"><h2>接入本地项目</h2><button type="button" data-close="project-dialog" class="icon-button" aria-label="关闭">✕</button></div><p class="form-note">添加后自动读取有效文本文件和约定，开始首次检查。</p><label>项目文件夹<input name="path" required placeholder="C:\Users\你\Projects\my-project" autocomplete="off"></label><label>项目名称 <span>可选</span><input name="name" placeholder="默认使用文件夹名称" maxlength="200"></label><label>排除路径 <span>每行一个，可使用通配符</span><textarea name="excludes" rows="2" placeholder="generated/**&#10;fixtures/**"></textarea></label><label>附加约定 <span>可选，与文件约定一同核对</span><textarea name="custom_rules" rows="3" placeholder="例如：公共接口变化时须同步更新使用示例。" maxlength="20000"></textarea></label><label class="checkbox-label"><input name="allow_send" type="checkbox" required><span>允许把本项目检查所需的代码、注释和文档发送至我配置的外部模型。</span></label><p class="form-note">默认排除依赖、构建产物和常见凭据文件。检查不会修改项目源文件。</p><button type="submit" class="primary full">接入并自动检查</button></form></dialog>
+  <dialog id="model-dialog"><form id="model-form"><div class="dialog-heading"><h2>连接外部模型</h2><button type="button" data-close="model-dialog" class="icon-button" aria-label="关闭">✕</button></div><p class="form-note">支持 OpenAI-compatible Chat Completions 接口。所有项目共享此配置。</p><label>API 基础地址<input name="base_url" type="url" required placeholder="https://your-provider.example/v1" autocomplete="off"></label><label>模型名称<input name="model" required placeholder="填写服务商提供的模型标识" maxlength="200" autocomplete="off"></label><label>API 密钥 <span id="key-hint">只保存在本机</span><input name="api_key" type="password" placeholder="API Key" autocomplete="new-password"></label><div class="form-grid"><label>请求超时（秒）<input name="timeout" type="number" min="1" max="300" value="60" required></label><label>上下文预算（字符）<input name="context_chars" type="number" min="2000" max="200000" value="60000" required></label></div><p class="form-note">保存配置后自动检查等待中的项目。请求失败会显示未完成；预算不足会展示未覆盖范围。</p><button type="submit" class="primary full">保存模型配置</button></form></dialog>
+</body>
+</html>
